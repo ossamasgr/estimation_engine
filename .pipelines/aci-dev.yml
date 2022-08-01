@@ -1,0 +1,79 @@
+# Continuous Integration (CI) pipeline that orchestrates the deployment of the estimation_engine model.
+
+# Runtime parameters to select artifacts
+parameters:
+- name : artifactBuildId
+  displayName: Model Train CI Build ID. Default is 'latest'.
+  type: string
+  default: latest
+
+pr: none
+
+# Trigger this pipeline on model-train pipeline completion
+trigger: none
+resources:
+  containers:
+  - container: mlops
+    image: mcr.microsoft.com/mlops/python:latest
+  pipelines:
+  - pipeline: model-train-ci
+    source: Model-Train-Register-CI # Name of the triggering pipeline
+    trigger:
+      branches:
+        include:
+        - master
+pool:
+  vmImage: windows-latest
+
+variables:
+- template: estimation_engine-variables-template.yml
+- group: devopsforai-aml-vg
+
+stages:
+- stage: 'Push_To_ACR'
+  displayName: 'Push Scoring Image To ACR'
+  jobs:
+  - job: "Package_and_deploy_model"
+    displayName: "Package and deploy model"
+    container: mlops
+    timeoutInMinutes: 0
+    steps:
+    - template: estimation_engine-get-model-id-artifact-template.yml
+      parameters:
+        projectId: '$(resources.pipeline.model-train-ci.projectID)'
+        pipelineId: '$(resources.pipeline.model-train-ci.pipelineID)'
+        artifactBuildId: ${{ parameters.artifactBuildId }}
+    - template: estimation_engine-package-model-template.yml
+      parameters:
+        modelId: $(MODEL_NAME):$(get_model.MODEL_VERSION)
+        scoringScriptPath: '$(Build.SourcesDirectory)/$(SOURCES_DIR_TRAIN)/scoring/score.py'
+        condaFilePath: '$(Build.SourcesDirectory)/$(SOURCES_DIR_TRAIN)/conda_dependencies.yml'
+    - script: echo $(IMAGE_LOCATION) >image_location.txt
+      displayName: "Write image location file"
+      
+- stage: 'Deploy_ACI'
+  displayName: 'Deploy to ACI'
+  condition: variables['ACI_DEPLOYMENT_NAME_DEV']
+  pool:
+    vmImage: windows-latest
+  jobs:
+  - job: "Deploy_ACI"  
+    displayName: "Deploy to ACI"
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Azure CLI '
+      inputs:
+        azureSubscription: 'azure-resource-connection'
+        scriptType: ps
+        scriptLocation: inlineScript
+        inlineScript: |
+          $BNAME = '$(BASE_NAME)'
+          echo $BNAME
+          $ACR = $BNAME+'amlcr'
+          echo $ACR
+          echo 'getting credentials'
+          $ACRS = $ACR+'.azurecr.io/package:20220729161615'
+          $Ruser = $(az acr credential show -n $ACR --query username)
+          $Rpassword = $(az acr credential show -n $ACR --query passwords[0].value)
+          echo Rpassword
+          az container create --resource-group $(RESOURCE_GROUP) --name $(ACI_DEPLOYMENT_NAME_DEV) --location centralus --image $ACRS --registry-username $Ruser --registry-password $Rpassword --restart-policy never --vnet VNetDigi --subnet aci

@@ -1,0 +1,70 @@
+# Trigger this pipeline on model-train pipeline completion
+trigger: none
+resources:
+  containers:
+  - container: mlops
+    image: mcr.microsoft.com/mlops/python:latest
+  pipelines:
+  - pipeline: deploy-to-aci-dev
+    source: Deploy-to-aci-dev # Name of the triggering pipeline
+    trigger:
+      branches:
+        include:
+        - master
+
+variables:
+- template: estimation_engine-variables-template.yml
+- group: devopsforai-aml-vg
+
+stages:
+- stage: 'Delay'
+  displayName: 'Delay for 24 Hours'
+  jobs:
+  - job: "Send_notif_sendgrid"
+    displayName: "send deletion notification for dev aci - sendgrid"
+    pool:
+      vmImage: 'windows-2019'
+    timeoutInMinutes: 0
+    steps:
+    - task: PowerShell@2
+      inputs:
+        targetType: 'inline'
+        script: |
+          Install-Module -Name PSSendGrid -Force
+          Import-Module -Name PSSendGrid
+          $Parameters = @{
+              FromAddress     = "ossama.assaghir@octopeek.com"
+              ToAddress       = "ossama.assaghir@gmail.com"
+              Subject         = "Dev-Aci sera supprimé dans 24 heures"
+              Body            = "Azure container instance dans l'environnement Dev sera supprimé dans 24 Heures"
+              Token           = "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"
+              FromName        = "Pipeline Alert"
+              ToName          = "DigitRE"
+          }
+          Send-PSSendGridMail @Parameters
+
+  - job:
+    pool: Server
+    steps:
+    - task: Delay@1
+      displayName: 'delay task for 24 Hours'
+      inputs:
+        delayForMinutes: '1440' 
+- stage: 'DELETE_ACI'
+  displayName: 'Delete Dev ACI'
+  condition: variables['ACI_DEPLOYMENT_NAME_DEV']
+  jobs:
+  - job: "DELETE_ACI"
+    displayName: "Delete Dev Aci"
+    container: mlops
+    timeoutInMinutes: 0
+    steps:
+    - task: AzureCLI@1
+      displayName: 'Install AzureML CLI'
+      inputs:
+        azureSubscription: '$(WORKSPACE_SVC_CONNECTION)'
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -e # fail on error
+          az container delete -n $(ACI_DEPLOYMENT_NAME_DEV) -g  $(RESOURCE_GROUP)  --yes -y
+          
